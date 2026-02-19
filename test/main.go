@@ -16,7 +16,7 @@ func main() {
 	// 1. Один раз при старте приложения инициализируем настройки
 	cfg := logrusplus.LoggerConfig{
 		ServiceName: "my_cool_app",
-		Mode:        logrusplus.ModeFile,
+		Mode:        logrusplus.ModeConsole,
 	}
 	logrusplus.Init(cfg)
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -25,15 +26,13 @@ type LoggerConfig struct {
 	FilePath    string
 }
 
-// CustomFormatter — оставляем без изменений
+// CustomFormatter — наше правило оформления логов
 type CustomFormatter struct {
 	ServiceName   string
 	DisableColors bool
 }
 
 func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	// ... (здесь весь твой код метода Format, который мы писали ранее, он не меняется)
-	// Для краткости я не дублирую его целиком, просто оставь его как есть!
 	var b *bytes.Buffer
 	if entry.Buffer != nil {
 		b = entry.Buffer
@@ -70,13 +69,39 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	}
 
 	timestamp := entry.Time.Format("2006.01.02 15:04:05")
+
+	// 3. Вытаскиваем "честную" иерархию (кто реально вызвал лог)
 	pkgName, className, funcName := "unknown", " ", "unknown"
 	line := 0
 
-	if entry.HasCaller() {
-		line = entry.Caller.Line
-		parts := strings.Split(entry.Caller.Function, "/")
-		funcParts := strings.Split(parts[len(parts)-1], ".")
+	// Вручную ищем в стеке первый кадр, который не относится к этой библиотеке
+	var frame runtime.Frame
+	pcs := make([]uintptr, 10)
+	n := runtime.Callers(3, pcs) // Пропускаем первые кадры (саму функцию Format и Log)
+	if n > 0 {
+		frames := runtime.CallersFrames(pcs[:n])
+		for {
+			f, more := frames.Next()
+			// Если мы нашли функцию, которая НЕ в нашем пакете и НЕ в самом logrus
+			if !strings.Contains(f.Function, "logrusplus") && !strings.Contains(f.Function, "sirupsen/logrus") {
+				frame = f
+				break
+			}
+			if !more {
+				break
+			}
+		}
+	}
+
+	// Если нашли подходящий кадр — парсим его
+	if frame.PC != 0 {
+		line = frame.Line
+		fullFuncName := frame.Function
+
+		parts := strings.Split(fullFuncName, "/")
+		lastPart := parts[len(parts)-1]
+
+		funcParts := strings.Split(lastPart, ".")
 		if len(funcParts) >= 2 {
 			pkgName = funcParts[0]
 			if len(funcParts) == 3 {
@@ -98,39 +123,33 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// --- НОВАЯ МАГИЯ НАЧИНАЕТСЯ ЗДЕСЬ ---
+// --- ИНИЦИАЛИЗАЦИЯ И НАСТРОЙКА ---
 
 // logrusLogger — наш скрытый глобальный логгер с базовыми настройками
 var logrusLogger = logrus.New()
 
 // Init настраивает наш глобальный логгер
 func Init(cfg LoggerConfig) {
+	// Эта настройка все еще полезна для базовой работы logrus
 	logrusLogger.SetReportCaller(true)
 
 	formatter := &CustomFormatter{
 		ServiceName: cfg.ServiceName,
 	}
 
-	// --- НОВАЯ ЛОГИКА: Подготовка пути и папки ---
+	// Подготовка пути и папки
 	if cfg.Mode == ModeFile || cfg.Mode == ModeRolling {
-		// Если путь не задан, генерируем стандартный
 		if cfg.FilePath == "" {
-			// Формат времени в Go задается через эталонную дату: 2006-01-02 15:04:05
 			timestamp := time.Now().Format("2006-01-02_15-04-05")
 			cfg.FilePath = fmt.Sprintf("./logs/%s.log", timestamp)
 		}
 
-		// Вытаскиваем путь к директории (например, из "./logs/2026-02-19.log" получим "./logs")
 		dir := filepath.Dir(cfg.FilePath)
 
-		// Создаем папку (0755 - стандартные права доступа: чтение/выполнение для всех, запись только для владельца)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logrusLogger.Warnf("Не удалось создать папку для логов '%s': %v", dir, err)
-			// Мы просто выводим предупреждение. Код пойдет дальше и, скорее всего,
-			// упадет на создании файла, переключившись на консоль (как у нас уже прописано в ModeFile)
 		}
 	}
-	// ----------------------------------------------
 
 	switch cfg.Mode {
 	case ModeConsole:
@@ -163,20 +182,20 @@ func Init(cfg LoggerConfig) {
 	logrusLogger.SetFormatter(formatter)
 }
 
-// Обертки для публичного использования
+// --- ПУБЛИЧНЫЕ МЕТОДЫ (ОБЕРТКИ) ---
 
 func Info(args ...interface{}) {
-	logrusLogger.Info(args...)
+	logrusLogger.Log(logrus.InfoLevel, args...)
 }
 
 func Error(args ...interface{}) {
-	logrusLogger.Error(args...)
-}
-
-func Warn(args ...interface{}) {
-	logrusLogger.Warn(args...)
+	logrusLogger.Log(logrus.ErrorLevel, args...)
 }
 
 func Debug(args ...interface{}) {
-	logrusLogger.Debug(args...)
+	logrusLogger.Log(logrus.DebugLevel, args...)
+}
+
+func Warn(args ...interface{}) {
+	logrusLogger.Log(logrus.WarnLevel, args...)
 }
