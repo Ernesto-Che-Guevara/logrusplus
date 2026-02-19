@@ -1,4 +1,4 @@
-module github.com:Ernesto-Che-Guevara/logrusplus
+module github.com/Ernesto-Che-Guevara/logrusplus
 
 go 1.25.6
 
