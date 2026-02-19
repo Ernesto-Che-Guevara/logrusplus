@@ -1,6 +1,6 @@
 package main
 
-import "logrusplus"
+import "github.com/Ernesto-Che-Guevara/logrusplus"
 
 type MyDatabase struct {
 	// Больше никакого logger *logrus.Logger здесь не нужно! 🎉
