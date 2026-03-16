@@ -2,6 +2,7 @@ package logrusplus
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -26,7 +27,6 @@ type LoggerConfig struct {
 	FilePath    string
 }
 
-// CustomFormatter — наше правило оформления логов
 type CustomFormatter struct {
 	ServiceName   string
 	DisableColors bool
@@ -70,20 +70,20 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 
 	timestamp := entry.Time.Format("2006.01.02 15:04:05")
 
-	// 3. Вытаскиваем "честную" иерархию (кто реально вызвал лог)
 	pkgName, className, funcName := "unknown", " ", "unknown"
 	line := 0
 
-	// Вручную ищем в стеке первый кадр, который не относится к этой библиотеке
+	// Умный поиск по стеку вызовов
 	var frame runtime.Frame
-	pcs := make([]uintptr, 10)
-	n := runtime.Callers(3, pcs) // Пропускаем первые кадры (саму функцию Format и Log)
+	pcs := make([]uintptr, 15)
+	// Пропускаем первые уровни (внутренности Format и самого logrus)
+	n := runtime.Callers(4, pcs)
 	if n > 0 {
 		frames := runtime.CallersFrames(pcs[:n])
 		for {
 			f, more := frames.Next()
-			// Если мы нашли функцию, которая НЕ в нашем пакете и НЕ в самом logrus
-			if !strings.Contains(f.Function, "logrusplus") && !strings.Contains(f.Function, "sirupsen/logrus") {
+			// Игнорируем стандартный logrus и нашу обертку logrusplus
+			if !strings.Contains(f.Function, "sirupsen/logrus") && !strings.Contains(f.Function, "logrusplus") {
 				frame = f
 				break
 			}
@@ -93,7 +93,6 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 		}
 	}
 
-	// Если нашли подходящий кадр — парсим его
 	if frame.PC != 0 {
 		line = frame.Line
 		fullFuncName := frame.Function
@@ -123,21 +122,18 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// --- ИНИЦИАЛИЗАЦИЯ И НАСТРОЙКА ---
+// --- ПУБЛИЧНАЯ СУЩНОСТЬ ЛОГГЕРА ---
 
-// logrusLogger — наш скрытый глобальный логгер с базовыми настройками
-var logrusLogger = logrus.New()
+// Log открыт для использования, если нужны специфичные методы logrus (WithField и т.д.)
+var Log = logrus.New()
 
-// Init настраивает наш глобальный логгер
 func Init(cfg LoggerConfig) {
-	// Эта настройка все еще полезна для базовой работы logrus
-	logrusLogger.SetReportCaller(true)
+	Log.SetReportCaller(true)
 
 	formatter := &CustomFormatter{
 		ServiceName: cfg.ServiceName,
 	}
 
-	// Подготовка пути и папки
 	if cfg.Mode == ModeFile || cfg.Mode == ModeRolling {
 		if cfg.FilePath == "" {
 			timestamp := time.Now().Format("2006-01-02_15-04-05")
@@ -145,24 +141,23 @@ func Init(cfg LoggerConfig) {
 		}
 
 		dir := filepath.Dir(cfg.FilePath)
-
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			logrusLogger.Warnf("Не удалось создать папку для логов '%s': %v", dir, err)
+			Log.Warnf("Не удалось создать папку для логов '%s': %v", dir, err)
 		}
 	}
 
 	switch cfg.Mode {
 	case ModeConsole:
-		logrusLogger.SetOutput(os.Stdout)
+		Log.SetOutput(os.Stdout)
 		formatter.DisableColors = false
 
 	case ModeFile:
 		file, err := os.OpenFile(cfg.FilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err != nil {
-			logrusLogger.Warn("Не удалось открыть файл логов, используем консоль")
-			logrusLogger.SetOutput(os.Stdout)
+			Log.Warn("Не удалось открыть файл логов, используем консоль")
+			Log.SetOutput(os.Stdout)
 		} else {
-			logrusLogger.SetOutput(file)
+			Log.SetOutput(file)
 			formatter.DisableColors = true
 		}
 
@@ -175,27 +170,70 @@ func Init(cfg LoggerConfig) {
 			LocalTime:  true,
 			Compress:   false,
 		}
-		logrusLogger.SetOutput(io.MultiWriter(rollingLogger))
+		Log.SetOutput(io.MultiWriter(rollingLogger))
 		formatter.DisableColors = true
 	}
 
-	logrusLogger.SetFormatter(formatter)
+	Log.SetFormatter(formatter)
 }
 
-// --- ПУБЛИЧНЫЕ МЕТОДЫ (ОБЕРТКИ) ---
+// --- ПУБЛИЧНЫЕ ОБЕРТКИ ДЛЯ БЫСТРОГО ДОСТУПА ---
 
-func Info(args ...interface{}) {
-	logrusLogger.Log(logrus.InfoLevel, args...)
+// 1. Базовые методы вывода
+func Trace(args ...interface{})   { Log.Trace(args...) }
+func Debug(args ...interface{})   { Log.Debug(args...) }
+func Info(args ...interface{})    { Log.Info(args...) }
+func Warn(args ...interface{})    { Log.Warn(args...) }
+func Warning(args ...interface{}) { Log.Warning(args...) } // Warning - это синоним Warn в logrus
+func Error(args ...interface{})   { Log.Error(args...) }
+func Fatal(args ...interface{})   { Log.Fatal(args...) }
+func Panic(args ...interface{})   { Log.Panic(args...) }
+
+// 2. Методы вывода с форматированием (подстановка переменных)
+func Tracef(format string, args ...interface{})   { Log.Tracef(format, args...) }
+func Debugf(format string, args ...interface{})   { Log.Debugf(format, args...) }
+func Infof(format string, args ...interface{})    { Log.Infof(format, args...) }
+func Warnf(format string, args ...interface{})    { Log.Warnf(format, args...) }
+func Warningf(format string, args ...interface{}) { Log.Warningf(format, args...) }
+func Errorf(format string, args ...interface{})   { Log.Errorf(format, args...) }
+func Fatalf(format string, args ...interface{})   { Log.Fatalf(format, args...) }
+func Panicf(format string, args ...interface{})   { Log.Panicf(format, args...) }
+
+// 3. Методы вывода с принудительным переносом строки
+func Traceln(args ...interface{})   { Log.Traceln(args...) }
+func Debugln(args ...interface{})   { Log.Debugln(args...) }
+func Infoln(args ...interface{})    { Log.Infoln(args...) }
+func Warnln(args ...interface{})    { Log.Warnln(args...) }
+func Warningln(args ...interface{}) { Log.Warningln(args...) }
+func Errorln(args ...interface{})   { Log.Errorln(args...) }
+func Fatalln(args ...interface{})   { Log.Fatalln(args...) }
+func Panicln(args ...interface{})   { Log.Panicln(args...) }
+
+// 4. Совместимость со стандартным логгером Go (fmt/log)
+func Print(args ...interface{})                 { Log.Print(args...) }
+func Printf(format string, args ...interface{}) { Log.Printf(format, args...) }
+func Println(args ...interface{})               { Log.Println(args...) }
+
+// --- ОБЕРТКИ ДЛЯ РАБОТЫ С ПОЛЯМИ И КОНТЕКСТОМ ---
+// Возвращают *logrus.Entry, что позволяет выстраивать цепочки:
+// loga.WithField("key", "val").Info("msg")
+
+func WithField(key string, value interface{}) *logrus.Entry {
+	return Log.WithField(key, value)
 }
 
-func Error(args ...interface{}) {
-	logrusLogger.Log(logrus.ErrorLevel, args...)
+func WithFields(fields logrus.Fields) *logrus.Entry {
+	return Log.WithFields(fields)
 }
 
-func Debug(args ...interface{}) {
-	logrusLogger.Log(logrus.DebugLevel, args...)
+func WithError(err error) *logrus.Entry {
+	return Log.WithError(err)
 }
 
-func Warn(args ...interface{}) {
-	logrusLogger.Log(logrus.WarnLevel, args...)
+func WithContext(ctx context.Context) *logrus.Entry {
+	return Log.WithContext(ctx)
+}
+
+func WithTime(t time.Time) *logrus.Entry {
+	return Log.WithTime(t)
 }
